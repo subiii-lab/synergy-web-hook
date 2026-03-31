@@ -67,7 +67,7 @@ def get_tracker_rows():
     return rows_data
 
 
-def def get_existing_task_ids():
+def get_existing_task_ids():
     sheet = get_sheet(MONTHLY_BRIDGE_SHEET_ID)
     col_map = get_column_map(sheet["columns"])
 
