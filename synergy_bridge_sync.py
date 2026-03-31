@@ -50,7 +50,7 @@ def get_tracker_rows():
     sheet = get_sheet(SYNERGY_TRACKER_SHEET_ID)
     col_map = get_column_map(sheet["columns"])
 
-    required_cols = ["Task ID", "Task Name", "Category", "SubCategory", "Workstream"]
+    required_cols = ["Task ID", "Task Name", "Category", "Sub-Category", "Workstream"]
 
     rows_data = []
     for row in sheet.get("rows", []):
@@ -89,10 +89,10 @@ def create_bridge_rows(record, bridge_col_map):
         rows.append({
             "toBottom": True,
             "cells": [
-                {"columnId": bridge_col_map["Initiative ID"], "value": record["Task ID"]},
+                {"columnId": bridge_col_map["Task ID"], "value": record["Task ID"]},
                 {"columnId": bridge_col_map["Initiative"], "value": record["Task Name"]},
                 {"columnId": bridge_col_map["Category"], "value": record["Category"]},
-                {"columnId": bridge_col_map["SubCategory"], "value": record["SubCategory"]},
+                {"columnId": bridge_col_map["Sub-Category"], "value": record["Sub-Category"]},
                 {"columnId": bridge_col_map["Workstream"], "value": record["Workstream"]},
                 {"columnId": bridge_col_map["Measure Type"], "value": measure},
             ],
