@@ -1,9 +1,10 @@
+B
 """
 Synergy Monthly Bridge Auto-Sync
 =================================
 Listens for Smartsheet webhook events on the PMI Synergy Tracker.
 When "Synergy Initiative" is checked on a row, automatically creates
-Target / Forecast / Actual rows in the Synergy Monthly Bridge sheet
+Target / Baseline / Actual rows in the Synergy Monthly Bridge sheet
 for that Task ID (if not already present).
 """
 
@@ -36,7 +37,7 @@ BRIDGE_COL_CATEGORY     = 6107759285407620
 BRIDGE_COL_MEASURE_TYPE = 1604159658037124
 
 API_BASE = "https://api.smartsheet.com/2.0"
-MEASURE_TYPES = ["Target", "Forecast", "Actual"]
+MEASURE_TYPES = ["Target", "Baseline", "Actual"]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -122,7 +123,7 @@ def get_existing_task_ids():
 
 
 def create_bridge_rows(task_id, info):
-    """Create Target / Forecast / Actual rows in the Monthly Bridge for a Task ID."""
+    """Create Target / BaselineB / Actual rows in the Monthly Bridge for a Task ID."""
     rows = []
     for measure in MEASURE_TYPES:
         rows.append({
@@ -137,7 +138,7 @@ def create_bridge_rows(task_id, info):
             ],
         })
     add_rows_to_sheet(MONTHLY_BRIDGE_SHEET_ID, rows)
-    log.info(f"Created Target/Forecast/Actual rows for Task ID '{task_id}' ({info['task_name']})")
+    log.info(f"Created Target/Baseline/Actual rows for Task ID '{task_id}' ({info['task_name']})")
 
 
 def sync_new_initiatives():
