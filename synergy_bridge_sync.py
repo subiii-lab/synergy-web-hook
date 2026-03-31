@@ -123,7 +123,7 @@ def get_existing_task_ids():
 
 
 def create_bridge_rows(task_id, info):
-    """Create Target / BaselineB / Actual rows in the Monthly Bridge for a Task ID."""
+    """Create Target / Baseline / Actual rows in the Monthly Bridge for a Task ID."""
     rows = []
     for measure in MEASURE_TYPES:
         rows.append({
