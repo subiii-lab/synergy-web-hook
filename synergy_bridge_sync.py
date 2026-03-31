@@ -71,7 +71,7 @@ def get_existing_task_ids():
     sheet = get_sheet(MONTHLY_BRIDGE_SHEET_ID)
     col_map = get_column_map(sheet["columns"])
 
-    task_id_col = col_map.get("Initiative ID")
+    task_id_col = col_map.get("Task ID")
     existing = set()
 
     for row in sheet.get("rows", []):
@@ -90,7 +90,7 @@ def create_bridge_rows(record, bridge_col_map):
             "toBottom": True,
             "cells": [
                 {"columnId": bridge_col_map["Task ID"], "value": record["Task ID"]},
-                {"columnId": bridge_col_map["Initiative"], "value": record["Task Name"]},
+                {"columnId": bridge_col_map["Task Name"], "value": record["Task Name"]},
                 {"columnId": bridge_col_map["Category"], "value": record["Category"]},
                 {"columnId": bridge_col_map["Sub-Category"], "value": record["Sub-Category"]},
                 {"columnId": bridge_col_map["Workstream"], "value": record["Workstream"]},
