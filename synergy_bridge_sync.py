@@ -1,22 +1,54 @@
+"""
+Synergy Monthly Bridge Auto-Sync
+=================================
+Listens for Smartsheet webhook events on the PMI Synergy Tracker.
+When "Synergy Initiative" is checked on a row, automatically creates
+Target / Baseline / Actuals rows in the Synergy Monthly Bridge sheet
+for that row's Sub-Category (if not already present).
+"""
+
 import os
 import logging
 import requests
 from flask import Flask, request, jsonify
 
+# ---------------------------------------------------------------------------
+# Configuration — set these as environment variables in Render
+# ---------------------------------------------------------------------------
+
 API_TOKEN = os.environ.get("SMARTSHEET_API_TOKEN", "")
 CALLBACK_URL = os.environ.get("WEBHOOK_CALLBACK_URL", "")
-PORT = int(os.environ.get("PORT", 5000))
+PORT = int(os.environ.get("PORT", 10000))   # Render uses 10000 by default
 
+# Smartsheet Sheet IDs
 SYNERGY_TRACKER_SHEET_ID = 8569817331093380
 MONTHLY_BRIDGE_SHEET_ID = 7008991855988612
 
+# Column IDs in the Monthly Bridge sheet (fixed — do not change)
+BRIDGE_COL_SUBCATEGORY  = 7233659192250244
+BRIDGE_COL_MEASURE_TYPE = 1604159658037124
+BRIDGE_COL_CATEGORY     = 6107759285407620
+BRIDGE_COL_WORKSTREAM   = 3855959471722372
+
+# Smartsheet API base URL
 API_BASE = "https://api.smartsheet.com/2.0"
 
+# Measure types to create per sub-category
 MEASURE_TYPES = ["Target", "Baseline", "Actuals"]
 
-logging.basicConfig(level=logging.INFO)
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
 log = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Smartsheet API helpers
+# ---------------------------------------------------------------------------
 
 def ss_headers():
     return {
@@ -40,284 +72,244 @@ def add_rows_to_sheet(sheet_id, rows_payload):
 
 
 def get_column_map(columns):
+    """Return {column_title: column_id} for a list of column objects."""
     return {col["title"]: col["id"] for col in columns}
 
 
-# --- CORE LOGIC ---
+# ---------------------------------------------------------------------------
+# Core sync logic
+# ---------------------------------------------------------------------------
 
-def get_tracker_rows():
+def get_flagged_subcategories():
+    """
+    Read the Synergy Tracker and return unique sub-categories where
+    Synergy Initiative = True.
+
+    Returns:
+        dict: { sub_category: {"category": ..., "workstream": ...} }
+    """
     sheet = get_sheet(SYNERGY_TRACKER_SHEET_ID)
     col_map = get_column_map(sheet["columns"])
-    required_cols = ["Task ID", "Task Name", "Category", "SubCategory", "Workstream"]
 
-    rows_data = []
+    # Column titles as they appear in the Synergy Tracker
+    col_subcat   = col_map.get("Sub-Category")
+    col_category = col_map.get("Category")
+    col_wstream  = col_map.get("Workstream")
+    col_syn_init = col_map.get("Synergy Initiative")
+
+    if not col_syn_init:
+        log.error("Could not find 'Synergy Initiative' column in Synergy Tracker")
+        return {}
+
+    flagged = {}
     for row in sheet.get("rows", []):
-        cell_map = {c["columnId"]: c.get("value") for c in row["cells"]}
-        record = {}
-        for col in required_cols:
-            col_id = col_map.get(col)
-            record[col] = cell_map.get(col_id)
-        if record.get("Task ID"):
-            rows_data.append(record)
-    return rows_data
+        cells = {c["columnId"]: c.get("value") for c in row["cells"]}
+
+        if cells.get(col_syn_init) is True:
+            sub_cat = cells.get(col_subcat, "")
+            if sub_cat and sub_cat not in flagged:
+                flagged[sub_cat] = {
+                    "category":   cells.get(col_category, ""),
+                    "workstream": cells.get(col_wstream, ""),
+                }
+
+    log.info(f"Synergy Tracker: {len(flagged)} unique flagged sub-categories")
+    return flagged
 
 
-def get_existing_task_ids():
+def get_existing_subcategories():
+    """
+    Read the Monthly Bridge and return sub-categories that already
+    have rows, so we don't create duplicates.
+
+    Returns:
+        set: Existing sub-category names
+    """
     sheet = get_sheet(MONTHLY_BRIDGE_SHEET_ID)
     col_map = get_column_map(sheet["columns"])
-    task_id_col = col_map.get("Task ID")
+    col_subcat = col_map.get("Sub-Category")
 
     existing = set()
     for row in sheet.get("rows", []):
         for cell in row["cells"]:
-            if cell["columnId"] == task_id_col and cell.get("value"):
+            if cell["columnId"] == col_subcat and cell.get("value"):
                 existing.add(cell["value"])
+
+    log.info(f"Monthly Bridge: {len(existing)} existing sub-categories")
     return existing
 
 
-def create_bridge_rows(record, bridge_col_map):
+def create_bridge_rows(sub_category, category, workstream):
+    """
+    Create 3 rows (Target / Baseline / Actuals) in the Monthly Bridge
+    for a new sub-category.
+    """
     rows = []
-    for measure in MEASURE_TYPES:
-        cells = []
-        if "Task ID" in bridge_col_map:
-            cells.append({"columnId": bridge_col_map["Task ID"], "value": record["Task ID"]})
-        if "Task Name" in bridge_col_map:
-            cells.append({"columnId": bridge_col_map["Task Name"], "value": record["Task Name"]})
-        if "Category" in bridge_col_map:
-            cells.append({"columnId": bridge_col_map["Category"], "value": record["Category"]})
-        if "SubCategory" in bridge_col_map:
-            cells.append({"columnId": bridge_col_map["SubCategory"], "value": record["SubCategory"]})
-        if "Workstream" in bridge_col_map:
-            cells.append({"columnId": bridge_col_map["Workstream"], "value": record["Workstream"]})
-        if "Measure Type" in bridge_col_map:
-            cells.append({"columnId": bridge_col_map["Measure Type"], "value": measure})
-
-        rows.append({"toBottom": True, "cells": cells})
-
-    add_rows_to_sheet(MONTHLY_BRIDGE_SHEET_ID, rows)
-    log.info(f"Created 3 rows for Task ID {record['Task ID']}")
-
-
-def sync_rows():
-    tracker_rows = get_tracker_rows()
-    existing_ids = get_existing_task_ids()
-
-    bridge_sheet = get_sheet(MONTHLY_BRIDGE_SHEET_ID)
-    bridge_col_map = get_column_map(bridge_sheet["columns"])
-
-    created = []
-    for record in tracker_rows:
-        task_id = record.get("Task ID")
-        if task_id not in existing_ids:
-            create_bridge_rows(record, bridge_col_map)
-            created.append(task_id)
-
-    log.info(f"Created rows for {len(created)} new tasks")
-    return created
-
-
-# --- FLASK ---
-
-app = Flask(__name__)
-
-
-@app.route("/webhook", methods=["POST"])
-def handle_webhook():
-    body = request.get_json(silent=True) or {}
-    challenge = body.get("challenge")
-    if challenge:
-        return jsonify({"smartsheetHookResponse": challenge}), 200
-
-    try:
-        created = sync_rows()
-        log.info(f"Webhook sync created: {created}")
-    except Exception as e:
-        log.error(f"Error: {e}", exc_info=True)
-
-    return jsonify({"status": "ok"}), 200
-
-
-@app.route("/sync", methods=["GET"])
-def manual_sync():
-    try:
-        created = sync_rows()
-        return jsonify({"created": created}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/debug", methods=["GET"])
-def debug_info():
-    """Shows exactly what the code sees in both sheets — use this to diagnose issues."""
-    try:
-        # Check tracker sheet
-        tracker_sheet = get_sheet(SYNERGY_TRACKER_SHEET_ID)
-        tracker_col_map = get_column_map(tracker_sheet["columns"])
-        tracker_columns = list(tracker_col_map.keys())
-        tracker_rows = get_tracker_rows()
-
-        # Check bridge sheet
-        bridge_sheet = get_sheet(MONTHLY_BRIDGE_SHEET_ID)
-        bridge_col_map = get_column_map(bridge_sheet["columns"])
-        bridge_columns = list(bridge_col_map.keys())
-        existing_ids = get_existing_task_ids()
-
-        # Find new tasks
-        new_tasks = [r for r in tracker_rows if r.get("Task ID") not in existing_ids]
-
-        return jsonify({
-            "tracker_sheet": {
-                "name": tracker_sheet.get("name"),
-                "column_names": tracker_columns,
-                "total_rows": len(tracker_sheet.get("rows", [])),
-                "rows_with_task_id": len(tracker_rows),
-                "sample_rows": tracker_rows[:3],
-            },
-            "bridge_sheet": {
-                "name": bridge_sheet.get("name"),
-                "column_names": bridge_columns,
-                "total_rows": len(bridge_sheet.get("rows", [])),
-                "existing_task_ids": list(existing_ids)[:10],
-            },
-            "sync_status": {
-                "new_tasks_to_create": len(new_tasks),
-                "new_task_ids": [r.get("Task ID") for r in new_tasks[:5]],
-            },
-            "api_token_set": bool(API_TOKEN),
-        }), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/health")
-def health():
-    return jsonify({"status": "healthy"}), 200
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=PORT)
-    url = f"{API_BASE}/sheets/{sheet_id}/rows"
-    resp = requests.post(url, headers=ss_headers(), json=rows_payload)
-    resp.raise_for_status()
-    return resp.json()
-
-
-def get_column_map(columns):
-    return {col["title"]: col["id"] for col in columns}
-
-
-# --- CORE LOGIC ---
-
-def get_tracker_rows():
-    sheet = get_sheet(SYNERGY_TRACKER_SHEET_ID)
-    col_map = get_column_map(sheet["columns"])
-
-    required_cols = ["Task ID", "Task Name", "Category", "Sub-Category", "Workstream"]
-
-    rows_data = []
-    for row in sheet.get("rows", []):
-        cell_map = {c["columnId"]: c.get("value") for c in row["cells"]}
-
-        record = {}
-        for col in required_cols:
-            col_id = col_map.get(col)
-            record[col] = cell_map.get(col_id)
-
-        if record.get("Task ID"):
-            rows_data.append(record)
-
-    return rows_data
-
-
-def get_existing_task_ids():
-    sheet = get_sheet(MONTHLY_BRIDGE_SHEET_ID)
-    col_map = get_column_map(sheet["columns"])
-
-    task_id_col = col_map.get("Task ID")
-    existing = set()
-
-    for row in sheet.get("rows", []):
-        for cell in row["cells"]:
-            if cell["columnId"] == task_id_col and cell.get("value"):
-                existing.add(cell["value"])
-
-    return existing
-
-
-def create_bridge_rows(record, bridge_col_map):
-    rows = []
-
     for measure in MEASURE_TYPES:
         rows.append({
             "toBottom": True,
             "cells": [
-                {"columnId": bridge_col_map["Task ID"], "value": record["Task ID"]},
-                {"columnId": bridge_col_map["Task Name"], "value": record["Task Name"]},
-                {"columnId": bridge_col_map["Category"], "value": record["Category"]},
-                {"columnId": bridge_col_map["Sub-Category"], "value": record["Sub-Category"]},
-                {"columnId": bridge_col_map["Workstream"], "value": record["Workstream"]},
-                {"columnId": bridge_col_map["Measure Type"], "value": measure},
+                {"columnId": BRIDGE_COL_SUBCATEGORY,  "value": sub_category},
+                {"columnId": BRIDGE_COL_MEASURE_TYPE, "value": measure},
+                {"columnId": BRIDGE_COL_CATEGORY,     "value": category},
+                {"columnId": BRIDGE_COL_WORKSTREAM,   "value": workstream},
             ],
         })
 
     add_rows_to_sheet(MONTHLY_BRIDGE_SHEET_ID, rows)
-    log.info(f"Created 3 rows for Task ID {record['Task ID']}")
+    log.info(f"Created Target/Baseline/Actuals rows for '{sub_category}'")
 
 
-def sync_rows():
-    tracker_rows = get_tracker_rows()
-    existing_ids = get_existing_task_ids()
+def sync_new_subcategories():
+    """
+    Main sync: find new sub-categories in Tracker not yet in Bridge
+    and create their 3 rows.
 
-    bridge_sheet = get_sheet(MONTHLY_BRIDGE_SHEET_ID)
-    bridge_col_map = get_column_map(bridge_sheet["columns"])
+    Returns:
+        list: Names of newly synced sub-categories
+    """
+    flagged  = get_flagged_subcategories()
+    existing = get_existing_subcategories()
 
     created = []
+    for sub_cat, info in flagged.items():
+        if sub_cat not in existing:
+            log.info(f"New sub-category detected: '{sub_cat}' — creating rows")
+            create_bridge_rows(sub_cat, info["category"], info["workstream"])
+            created.append(sub_cat)
 
-    for record in tracker_rows:
-        task_id = record.get("Task ID")
-        if task_id not in existing_ids:
-            create_bridge_rows(record, bridge_col_map)
-            created.append(task_id)
+    if created:
+        log.info(f"Sync complete — created rows for: {created}")
+    else:
+        log.info("Sync complete — no new sub-categories found")
 
-    log.info(f"Created rows for {len(created)} new tasks")
     return created
 
 
-# --- FLASK ---
+# ---------------------------------------------------------------------------
+# Webhook setup helpers
+# ---------------------------------------------------------------------------
+
+def register_webhook():
+    """Register and enable the Smartsheet webhook."""
+    # Check if it already exists
+    existing = requests.get(f"{API_BASE}/webhooks", headers=ss_headers()).json()
+    for wh in existing.get("data", []):
+        if (wh.get("scopeObjectId") == SYNERGY_TRACKER_SHEET_ID
+                and wh.get("callbackUrl") == CALLBACK_URL):
+            log.info(f"Webhook already exists: ID {wh['id']}")
+            return wh["id"]
+
+    # Create new webhook
+    payload = {
+        "name": "Synergy Initiative Auto-Sync",
+        "callbackUrl": CALLBACK_URL,
+        "scope": "sheet",
+        "scopeObjectId": SYNERGY_TRACKER_SHEET_ID,
+        "events": ["*.*"],
+        "version": 1,
+    }
+    resp = requests.post(f"{API_BASE}/webhooks", headers=ss_headers(), json=payload)
+    resp.raise_for_status()
+    webhook_id = resp.json()["result"]["id"]
+
+    # Enable it
+    requests.put(
+        f"{API_BASE}/webhooks/{webhook_id}",
+        headers=ss_headers(),
+        json={"enabled": True},
+    ).raise_for_status()
+
+    log.info(f"Webhook created and enabled: ID {webhook_id}")
+    return webhook_id
+
+
+# ---------------------------------------------------------------------------
+# Flask app
+# ---------------------------------------------------------------------------
 
 app = Flask(__name__)
 
 
 @app.route("/webhook", methods=["POST"])
 def handle_webhook():
+    """
+    Receives Smartsheet webhook callbacks.
+    - Verification challenge: echoed back immediately
+    - Change events: triggers sync
+    """
     body = request.get_json(silent=True) or {}
 
+    # Smartsheet verification handshake
     challenge = body.get("challenge")
     if challenge:
+        log.info("Webhook verification challenge received — responding")
         return jsonify({"smartsheetHookResponse": challenge}), 200
 
-    try:
-        created = sync_rows()
-        log.info(f"Webhook sync created: {created}")
-    except Exception as e:
-        log.error(f"Error: {e}", exc_info=True)
+    # Change event — run sync
+    scope_id = body.get("scopeObjectId", 0)
+    events   = body.get("events", [])
+    log.info(f"Webhook event: scopeObjectId={scope_id}, events={len(events)}")
+
+    if scope_id == SYNERGY_TRACKER_SHEET_ID:
+        try:
+            created = sync_new_subcategories()
+            log.info(f"Webhook sync done — new rows: {created}")
+        except Exception as e:
+            log.error(f"Sync error: {e}", exc_info=True)
 
     return jsonify({"status": "ok"}), 200
 
 
-@app.route("/sync", methods=["GET"])
+@app.route("/sync", methods=["GET", "POST"])
 def manual_sync():
+    """Manual trigger — call this anytime to force a sync."""
     try:
-        created = sync_rows()
-        return jsonify({"created": created}), 200
+        created = sync_new_subcategories()
+        return jsonify({
+            "status": "ok",
+            "new_subcategories": created,
+            "message": f"Created rows for {len(created)} sub-categories"
+                       if created else "No new sub-categories to sync",
+        }), 200
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        log.error(f"Manual sync error: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
-@app.route("/health")
+@app.route("/setup-webhook", methods=["GET", "POST"])
+def setup_webhook():
+    """One-time webhook registration — call after deployment."""
+    if not CALLBACK_URL:
+        return jsonify({
+            "status": "error",
+            "message": "WEBHOOK_CALLBACK_URL env var not set",
+        }), 400
+    try:
+        webhook_id = register_webhook()
+        return jsonify({"status": "ok", "webhook_id": webhook_id}), 200
+    except Exception as e:
+        log.error(f"Webhook setup error: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "healthy"}), 200
 
 
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
 if __name__ == "__main__":
+    if not API_TOKEN:
+        log.error("SMARTSHEET_API_TOKEN is not set — exiting")
+        exit(1)
+
+    log.info(f"Starting Synergy Bridge Sync on port {PORT}")
+    log.info(f"  Tracker sheet:  {SYNERGY_TRACKER_SHEET_ID}")
+    log.info(f"  Bridge sheet:   {MONTHLY_BRIDGE_SHEET_ID}")
+    log.info(f"  Callback URL:   {CALLBACK_URL or '(not set)'}")
+
     app.run(host="0.0.0.0", port=PORT)
