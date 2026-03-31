@@ -1,4 +1,4 @@
-B
+
 """
 Synergy Monthly Bridge Auto-Sync
 =================================
